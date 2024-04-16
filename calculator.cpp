@@ -10,9 +10,10 @@
 #include <cstring>
 #include <string>
 #include <vector>
-#include <unistd.h>   // For execvp
-#include <sys/wait.h> // For waitpid
-#include <cstdlib>     // For exit
+#include <algorithm>
+#include <cstdlib>
+#include <iomanip>
+#include <cmath>
 
 /*
     Class define: Command
@@ -43,7 +44,7 @@ class Command {
             return;
         }
 };
-// constructor definition (does nothing yet)
+// constructor definition (set _operator)
 Command::Command() {
     _operator = "";
 }
@@ -71,8 +72,9 @@ Command::Command() {
 /*
     Helper functions:
         - clean_cmd   : store the string command in the Command object
+            - comp_desc         : sort function to sort in descending order;
             - extract_substring : used by clean_cmd to remove parentheses
-        - run_ops     : convert a Command object instance into a bash script to run.
+        - run_ops     : compute a clean operation from the Command object.
         - print_help  : prints a help message
         - sig_setup   : register signals
         - sig_handler : handle SIGINT (cntrl-c)
@@ -91,18 +93,38 @@ std::string extract_substring(const std::string& input, char start, char end) {
     return input.substr(start_idx+1, end_idx-start_idx-1);
 }
 
+// function for sort to help sort in descending order
+bool comp_desc(int a, int b) {
+    return a > b;
+}
+
 Command clean_cmd(char* cmd) {
     // separate into a list of operands/commands:
-    // char* token;
-    // char* saveptr;
 
-    //std::vector<char*> all_tokens;
     std::string cmd_stream = cmd;
-    
     // create a Command object
     Command command = Command();
 
-    // TODO: remove all spaces
+    // remove all spaces (so whitespace does not affect anything)
+    char space = ' ';
+    // add all space indexes to a list to remove them after finding
+    // them (avoid concurrrent mod error)
+    std::vector<int> to_remove = {};
+    for(int i=0; i<cmd_stream.length(); i++) {
+        if(cmd_stream.at((size_t)i) == ' ') {
+            to_remove.push_back(i);
+        }
+    }
+    // sort the 'to_remove' vector in descending order,
+    // so that removes from the end will not affect indices
+    // near the beginning
+    if(!to_remove.empty()) {
+        std::sort(to_remove.begin(), to_remove.end(), comp_desc);
+    }
+    // now remove all ints from `to_remove`:
+    for(int num : to_remove) {
+        cmd_stream.erase(num, 1);
+    }
 
     // TODO: add better functionality for multiple
     // clause groups and nested clauses.
@@ -126,28 +148,45 @@ Command clean_cmd(char* cmd) {
         //     clause_raw = extract_substring(cmd_stream, '(', ')');
         // }
     }
-    // add the operands to the Command object (convert to double)
-    command.push_operand(clause_raw[0] - '0');
-    command.push_operand(clause_raw[2] - '0');
-    // extract operator
-    char op[2];
-    op[0] = clause_raw[1];
-    op[1] = '\0'; 
-    command.set_operator((char*)op);
-    
-    // std::cout << "all tokens parsed:" << std::endl;
-    // for (const auto& num : all_tokens) {
-    //     std::cout << num << std::endl;
-    // }
 
-    // test ; change this
-    // char* op = "*";
-    // std::vector<double> nums = { 10.5, 20.7, 5.0 };
+    // add the operands to the Command object
+    // if this is a simple clause, there are 3 chars --> op1, operator, op2
+    if(clause_raw.length() == 3) {
+        // the operator is +,-,*,/,&,|, or ^=
+        command.push_operand(clause_raw[0] - '0');
+        command.push_operand(clause_raw[2] - '0');
+        // extract operator
+        char op[2];
+        op[0] = clause_raw[1];
+        op[1] = '\0'; 
+        command.set_operator((char*)op);
+    } else {
+        // this is a non-standard clause:
+
+        // TODO: add functionality for negative numbers
+
+        command.push_operand(clause_raw[0] - '0');
+        command.push_operand(clause_raw[3] - '0');
+        // extract operator
+        char op[3];
+        op[0] = clause_raw[1];
+        op[1] = clause_raw[2];
+        op[2] = '\0'; 
+        command.set_operator((char*)op);
+    }
 
     return command;
 }
 
 void run_ops(Command cmd) {
+
+    // notes::::
+    /*
+        bash bitwise shift operator: 
+            $((2 << 4)) (ret: 32)
+            ^= --> XOR
+        reference : https://www.baeldung.com/linux/bash-bitwise-operators
+    */
 
     // perform the calculation and print the result
     double ret = 0.0;
@@ -167,9 +206,9 @@ void run_ops(Command cmd) {
         int iop1 = (int)op1;
         int iop2 = (int)op2;
         if (ret_operator == "<<") { 
-            ret = iop1 << iop2;
+            ret = iop1 * std::pow(2,iop2);
         } else if (ret_operator == ">>") { 
-            ret = iop1 >> iop2;
+            ret = iop1 * std::pow(2,-iop2);
         } else if (ret_operator == "&") { 
             ret = iop1 & iop2;
         } else if (ret_operator == "|") { 
@@ -180,7 +219,7 @@ void run_ops(Command cmd) {
     }
 
     // print result
-    std::cout << ret << std::endl;
+    std::cout << std::fixed << std::setprecision(6) << ret << std::endl;
 
     return;
 }
@@ -192,19 +231,12 @@ void print_help() {
             "Command symbols and meanings\n" <<
             "\t - +, -, *, /   --> add, subtract, multiply, divide; these require 2 operands.\n" <<
             "\t - << n, >> n   --> n-left logical shift (*2^n), n-right logical shift (/2^n); these require an operand an an integer n.\n" <<
-            "\t - -k           --> negative number; only when k is an integer and the dash directly follows k with no whitespace.\n" <<
+            "\t - -k           --> negative number, where k is any number.\n" <<
             "\t - &, |, ~, ^=  --> Bitwise AND, OR, NOT, XOR; these require 2 operands.\n" <<
-            "\t - x.x          --> Floating point number (decimal number), requires no whitespace between integers (x) and point.\n" <<
+            "\t - x.x          --> Floating point number (decimal number).\n" <<
             "\t - ()           --> Parentheses; these must come in pairs.\n" <<
             "--------------------------------------\n" <<
     std::endl;
-    // notes::::
-    /*
-        bash bitwise shift operator: 
-            $((2 << 4)) (ret: 32)
-            ^= --> XOR
-        reference : https://www.baeldung.com/linux/bash-bitwise-operators
-    */
 
     return;
 }
@@ -264,7 +296,7 @@ int main() {
         std::cin.getline(cmd, sizeof(cmd));
 
         // reset clauses list:
-        //clauses = {};
+        clauses.clear();
 
         const char* op = cmd;
 
